@@ -1,5 +1,5 @@
 #define MyAppName "MC Resource Table"
-#define MyAppVersion "13.2"
+#define MyAppVersion "13.4"
 #define MyAppExeName "MCResourceTable.exe"
 [Setup]
 AppId={{6A5E6C11-4C34-4F21-9C43-7C85A17F93D1}
