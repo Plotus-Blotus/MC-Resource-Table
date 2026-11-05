@@ -31,7 +31,7 @@ class Studio:
             language='English'
         self.settings=saved if isinstance(saved,dict) else {}
         self.language=tk.StringVar(value=language if language in ('English',*TRANSLATIONS) else 'English')
-        root.title('MC Resource Table 13.2 — Resizable Studio')
+        root.title('MC Resource Table 13.4 — Entity Model Import')
         root.geometry('1520x940')
         root.minsize(920, 650)
         self.other_assets = {}  # Original and edited non-PNG assets.
@@ -80,6 +80,7 @@ class Studio:
         self.preview_job=None
         self.preview_interactive=False
         self.preview_face_signature=None
+        self.entity_models={}  # keyed by texture path; user-imported model data
         self.preview_rotation=0
         self.view_yaw=0.65
         self.view_pitch=0.45
@@ -339,7 +340,7 @@ class Studio:
         # Use a compact two-row toolbar. The old single row clipped buttons
         # on 960px windows or with Windows display scaling above 100%.
         header=ttk.Frame(self.root,padding=(12,8,12,2));header.pack(fill='x')
-        ttk.Label(header,text='▣  MC Resource Table 13.2',font=('Segoe UI',21,'bold')).pack(side='left')
+        ttk.Label(header,text='▣  MC Resource Table 13.4',font=('Segoe UI',21,'bold')).pack(side='left')
         toolbar=ttk.Frame(self.root,padding=(12,2,12,8));toolbar.pack(fill='x')
         row1=ttk.Frame(toolbar);row1.pack(fill='x',pady=2)
         row2=ttk.Frame(toolbar);row2.pack(fill='x',pady=2)
@@ -349,6 +350,7 @@ class Studio:
             (row1,'Load assets folder',self.load_folder),
             (row1,'Import PNG',self.import_png),
             (row1,'Other Assets',self.asset_manager),
+            (row2,'Import Entity Model',self.import_entity_model),
             (row2,'Open Project',self.open_project),
             (row2,'Save Project',self.save_project),
             (row2,'Validate Pack',self.show_validation),
@@ -813,6 +815,136 @@ class Studio:
                 quads.append((surfaces[direction],uvcoords,tex,0.9 if direction=='up' else 0.75 if direction=='down' else 0.85))
         return quads or None
 
+    def import_entity_model(self):
+        """Import Blockbench cuboid model JSON (.bbmodel), attached to current texture.
+
+        This is an opt-in model import, NOT automatic extraction from client JAR.
+        """
+        if not self.current.startswith('entity/'):
+            messagebox.showinfo('Entity model','Select an entity texture first.');return
+        filename=filedialog.askopenfilename(title='Import Blockbench entity model',filetypes=[('Blockbench model','*.bbmodel'),('JSON model','*.json')])
+        if not filename:return
+        try:
+            data=json.loads(Path(filename).read_text(encoding='utf-8'))
+            if not isinstance(data,dict) or not isinstance(data.get('elements'),list):
+                raise ValueError('Expected a Blockbench model with an elements array.')
+            cubes=[e for e in data['elements'] if isinstance(e,dict) and e.get('type','cube')=='cube' and isinstance(e.get('faces'),dict)]
+            if not cubes:raise ValueError('No UV-mapped cubes found. Export a cuboid Blockbench model.')
+            self.entity_models[self.current]=data
+            self.preview_face_signature=None
+            self.schedule_preview(force=True)
+            self.status.set(f'Imported {len(cubes)} model cubes for {self.current} (Blockbench)')
+            messagebox.showinfo('Model imported',f'Loaded {len(cubes)} cubes for {self.current}.\n\nThis model is for preview only; it is not included in the resource pack.\nGroup transforms, meshes and animations are not yet supported.')
+        except (OSError,UnicodeError,ValueError,TypeError) as exc:
+            messagebox.showerror('Cannot import model',str(exc))
+
+    def imported_entity_geometry(self):
+        """Render cuboid face UVs from a user-supplied Blockbench model."""
+        data=self.entity_models.get(self.current)
+        if not data:return None
+        img=self.composite_layers();iw,ih=img.size
+        resolution=data.get('resolution') or {}
+        tw=max(1,float(resolution.get('width',iw)))
+        th=max(1,float(resolution.get('height',ih)))
+        quads=[]
+        for cube in data.get('elements',[])[:512]:
+            if not isinstance(cube,dict) or cube.get('type','cube')!='cube':continue
+            a=cube.get('from');b=cube.get('to');faces=cube.get('faces',{})
+            if not isinstance(a,list) or not isinstance(b,list) or len(a)!=3 or len(b)!=3:continue
+            try:
+                x0,y0,z0=[(float(v)-8)/8 for v in a];x1,y1,z1=[(float(v)-8)/8 for v in b]
+            except (ValueError,TypeError):continue
+            surfaces={
+              'up':[(x0,y1,z0),(x1,y1,z0),(x1,y1,z1),(x0,y1,z1)],
+              'down':[(x0,y0,z1),(x1,y0,z1),(x1,y0,z0),(x0,y0,z0)],
+              'north':[(x1,y0,z0),(x0,y0,z0),(x0,y1,z0),(x1,y1,z0)],
+              'south':[(x0,y0,z1),(x1,y0,z1),(x1,y1,z1),(x0,y1,z1)],
+              'east':[(x1,y0,z1),(x1,y0,z0),(x1,y1,z0),(x1,y1,z1)],
+              'west':[(x0,y0,z0),(x0,y0,z1),(x0,y1,z1),(x0,y1,z0)],
+            }
+            # Apply per-cube Euler rotation around the Blockbench origin.
+            origin=cube.get('origin',[8,8,8]);angles=cube.get('rotation',[0,0,0])
+            if len(origin)==3 and len(angles)==3:
+                try:
+                    pivot=[(float(v)-8)/8 for v in origin]
+                    angles=[math.radians(float(v)) for v in angles]
+                    def rotate(v):
+                        x,y,z=[v[i]-pivot[i] for i in range(3)]
+                        ax,ay,az=angles
+                        y,z=y*math.cos(ax)-z*math.sin(ax),y*math.sin(ax)+z*math.cos(ax)
+                        x,z=x*math.cos(ay)+z*math.sin(ay),-x*math.sin(ay)+z*math.cos(ay)
+                        x,y=x*math.cos(az)-y*math.sin(az),x*math.sin(az)+y*math.cos(az)
+                        return (x+pivot[0],y+pivot[1],z+pivot[2])
+                    surfaces={k:[rotate(v) for v in verts] for k,verts in surfaces.items()}
+                except (ValueError,TypeError):pass
+            for direction,face in faces.items():
+                if direction not in surfaces or not isinstance(face,dict) or not isinstance(face.get('uv'),list):continue
+                uv=face['uv']
+                if len(uv)!=4:continue
+                try:u0,v0,u1,v1=[float(v) for v in uv]
+                except (TypeError,ValueError):continue
+                coords=[(u0/tw,v1/th),(u0/tw,v0/th),(u1/tw,v0/th),(u1/tw,v1/th)]
+                turns=int(face.get('rotation',0))//90%4
+                coords=coords[turns:]+coords[:turns]
+                quads.append((surfaces[direction],coords,self.current,.9 if direction=='up' else .8))
+        return quads or None
+
+    def entity_geometry(self):
+        """Approximate vanilla cuboid previews for common 64x32/64x64 mob atlases.
+
+        Entity mesh definitions live in Minecraft Java code, not resource-pack JSON.
+        Unsupported mobs intentionally show a message instead of a misleading cube.
+        """
+        if not self.current.startswith('entity/'):return None
+        imported=self.imported_entity_geometry()
+        if imported:return imported
+        path=self.current
+        filename=path.rsplit('/',1)[-1]
+        kind=None
+        if filename in ('steve','alex','wide','slim','player','zombie','husk','drowned','skeleton','stray','wither_skeleton') or any(x in path for x in ('/zombie/','/skeleton/','/player/')):
+            kind='humanoid'
+        elif filename in ('creeper','charged_creeper') or '/creeper/' in path:kind='creeper'
+        elif filename in ('pig','cow','mooshroom','sheep','sheep_fur') or any(x in path for x in ('/cow/','/pig/','/sheep/')):kind='quadruped'
+        if kind is None:return None
+        atlas=self.composite_layers()
+        aw,ah=atlas.size
+        if aw<32 or ah<16:return None
+        # Cuboids in model space: center, dimensions, UV origin in 64x32 vanilla atlas units.
+        if kind=='humanoid':
+            boxes=[((0,.75,0),(.72,.72,.72),(0,0)),((0,-.12,0),(.72,1.05,.38),(16,16)),
+                   ((-.52,-.13,0),(.30,1.02,.36),(40,16)),((.52,-.13,0),(.30,1.02,.36),(40,16)),
+                   ((-.19,-1.04,0),(.32,.9,.36),(0,16)),((.19,-1.04,0),(.32,.9,.36),(0,16))]
+        elif kind=='creeper':
+            boxes=[((0,.7,0),(.9,.9,.9),(0,0)),((0,-.25,0),(.82,1.2,.48),(16,16)),
+                   ((-.29,-1.04,-.27),(.3,.58,.34),(0,16)),((.29,-1.04,-.27),(.3,.58,.34),(0,16)),
+                   ((-.29,-1.04,.27),(.3,.58,.34),(0,16)),((.29,-1.04,.27),(.3,.58,.34),(0,16))]
+        else:
+            boxes=[((0,.30,0),(.8,.7,.78),(0,0)),((0,-.34,0),(1.05,.9,1.45),(28,8)),
+                   ((-.34,-1.04,-.47),(.27,.72,.3),(0,16)),((.34,-1.04,-.47),(.27,.72,.3),(0,16)),
+                   ((-.34,-1.04,.47),(.27,.72,.3),(0,16)),((.34,-1.04,.47),(.27,.72,.3),(0,16))]
+        quads=[]
+        # Each box gets Minecraft's usual unfolded box UV layout. The dimensions
+        # are approximate; UV placement is most useful on 64x32 mob skins.
+        for center,dims,origin in boxes:
+            x,y,z=center;w,h,d=dims
+            x0,x1=x-w/2,x+w/2;y0,y1=y-h/2,y+h/2;z0,z1=z-d/2,z+d/2
+            a,b=origin
+            # Texture widths in pixels, scaled to classic 64-unit layout.
+            tw=max(1,round(w*8));th=max(1,round(h*8));td=max(1,round(d*8))
+            surfaces=[
+              ([(x0,y1,z0),(x1,y1,z0),(x1,y1,z1),(x0,y1,z1)],(a+td,b,a+td+tw,b+td),.98),
+              ([(x0,y0,z1),(x1,y0,z1),(x1,y0,z0),(x0,y0,z0)],(a+td+tw,b,a+td+tw+tw,b+td),.65),
+              ([(x0,y0,z1),(x0,y1,z1),(x1,y1,z1),(x1,y0,z1)],(a+td,b+td,a+td+tw,b+td+th),.86),
+              ([(x1,y0,z0),(x1,y1,z0),(x0,y1,z0),(x0,y0,z0)],(a+td+tw+td,b+td,a+td+tw+td+tw,b+td+th),.76),
+              ([(x0,y0,z0),(x0,y1,z0),(x0,y1,z1),(x0,y0,z1)],(a,b+td,a+td,b+td+th),.75),
+              ([(x1,y0,z1),(x1,y1,z1),(x1,y1,z0),(x1,y0,z0)],(a+td+tw,b+td,a+td+tw+td,b+td+th),.81),
+            ]
+            for verts,uvbox,shade in surfaces:
+                u0,v0,u1,v1=uvbox
+                uv=[(u0/64,v1/32),(u0/64,v0/32),(u1/64,v0/32),(u1/64,v1/32)]
+                quads.append((verts,uv,path,shade))
+        return quads
+
     def open_fullscreen_preview(self):
         if self.fullscreen_window is not None and self.fullscreen_window.winfo_exists():
             self.fullscreen_window.lift()
@@ -911,7 +1043,8 @@ class Studio:
         self.preview_job=None
         if not hasattr(self,'block_preview'):return
         faces=self.block_faces()
-        signature=tuple(faces)
+        entity_quads=self.entity_geometry() if self.current.startswith('entity/') else None
+        signature=tuple(faces) if not entity_quads else (('Entity texture',self.current),)
         if signature!=self.preview_face_signature:
             for w in self.face_frame.winfo_children():w.destroy()
             self.preview_face_signature=signature
@@ -919,9 +1052,11 @@ class Studio:
         if not faces:
             self.block_preview.create_text(108,100,text='3D cube preview available\\nfor block textures',fill='#aab9d5',justify='center')
             return
-        if not self.face_frame.winfo_children():
+        if faces and not self.face_frame.winfo_children():
             for label,path in faces:
                 ttk.Button(self.face_frame,text=label,command=lambda p=path:self.open_path(p)).pack(fill='x',pady=1)
+        if entity_quads and not self.face_frame.winfo_children():
+            ttk.Button(self.face_frame,text='Entity texture',command=lambda p=self.current:self.open_path(p)).pack(fill='x',pady=1)
         mapped=dict(faces)
         def tex(label):
             path=mapped.get(label,self.current)
@@ -958,7 +1093,7 @@ class Studio:
             ([0,3,7,4],'side',0.78),
             ([5,6,2,1],'side',0.83),
         ]
-        model_quads=self.model_geometry()
+        model_quads=entity_quads or self.model_geometry()
         coords=[project(v) for v in verts]
         def raster(tri,uvs,texture,brightness,path):
             (ax,ay,az),(bx,by,bz),(cx,cy,cz)=tri
@@ -969,6 +1104,7 @@ class Studio:
             y0=max(0,int(math.floor(min(ay,by,cy))))
             y1=min(size-1,int(math.ceil(max(ay,by,cy))))
             tpx=texture.load()
+            texture_width,texture_height=texture.size
             for py in range(y0,y1+1):
                 for px in range(x0,x1+1):
                     x=px+0.5;y=py+0.5
@@ -983,8 +1119,8 @@ class Studio:
                     if depth>=zbuf[idx]:continue
                     u=(w0*uvs[0][0]/az+w1*uvs[1][0]/bz+w2*uvs[2][0]/cz)*depth
                     v=(w0*uvs[0][1]/az+w1*uvs[1][1]/bz+w2*uvs[2][1]/cz)*depth
-                    tx=max(0,min(63,int(u*63)))
-                    ty=max(0,min(63,int(v*63)))
+                    tx=max(0,min(texture_width-1,int(u*texture_width)))
+                    ty=max(0,min(texture_height-1,int(v*texture_height)))
                     r,g,b,a=tpx[tx,ty]
                     if a==0:continue
                     zbuf[idx]=depth
@@ -994,7 +1130,7 @@ class Studio:
             for quad,uv,texpath,shade in model_quads:
                 tex=self.composite_layers() if texpath==self.current else self.image_for(texpath)
                 if texpath not in self.base and texpath not in self.edits and texpath not in self.names:continue
-                tex=tex.convert('RGBA').resize((64,64),Image.Resampling.NEAREST)
+                tex=tex.convert('RGBA') if entity_quads else tex.convert('RGBA').resize((64,64),Image.Resampling.NEAREST)
                 v=[project(point) for point in quad]
                 raster([v[0],v[1],v[2]],[uv[0],uv[1],uv[2]],tex,shade,texpath)
                 raster([v[0],v[2],v[3]],[uv[0],uv[2],uv[3]],tex,shade,texpath)
