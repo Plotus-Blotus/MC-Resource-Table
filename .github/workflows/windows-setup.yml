@@ -1,0 +1,61 @@
+name: Build Windows Setup.exe
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Package Windows application
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --icon mc_resource_table.ico --add-data "mc_resource_table.png;." --name MCResourceTable app.py
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+
+      - name: Build Setup.exe
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
+          )
+          $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw 'Inno Setup 6 ISCC.exe not found' }
+          & $iscc installer.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path 'output/MC_Resource_Table_Setup.exe')) { throw 'Setup.exe was not created' }
+
+      - name: Upload downloadable installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: MC-Resource-Table-13.2-Setup
+          path: output/MC_Resource_Table_Setup.exe
+          if-no-files-found: error
+
+      - name: Publish GitHub Release for version tags
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: gh release create "${{ github.ref_name }}" "output/MC_Resource_Table_Setup.exe" --title "MC Resource Table ${{ github.ref_name }}" --notes "Windows installer (Setup.exe) for MC Resource Table."
